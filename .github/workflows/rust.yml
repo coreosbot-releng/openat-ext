@@ -7,6 +7,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 permissions:
   contents: read
 
@@ -17,18 +18,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Minimum supported Rust version (MSRV)
-  MSRV: 1.49.0
   # Pinned toolchain for linting
-  ACTIONS_LINTS_TOOLCHAIN: 1.71.0
+  ACTIONS_LINTS_TOOLCHAIN: 1.90.0
 
 jobs:
   tests-stable:
     name: Tests, stable toolchain
     runs-on: ubuntu-latest
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -42,9 +42,10 @@ jobs:
   tests-release-stable:
     name: Tests (release), stable toolchain
     runs-on: ubuntu-latest
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -58,9 +59,16 @@ jobs:
   tests-release-msrv:
     name: Tests (release), minimum supported toolchain
     runs-on: ubuntu-latest
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
+      - name: Detect crate MSRV
+        run: |
+          msrv=$(cargo metadata --format-version 1 --no-deps | \
+              jq -r '.packages[0].rust_version')
+          echo "Crate MSRV: $msrv"
+          echo "MSRV=$msrv" >> $GITHUB_ENV
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -74,9 +82,10 @@ jobs:
   linting:
     name: Lints, pinned toolchain
     runs-on: ubuntu-latest
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -88,16 +97,47 @@ jobs:
         run: cargo fmt -- --check -l
       - name: cargo clippy (warnings)
         run: cargo clippy --all-targets -- -D warnings
+  check-lockfile-downgrades:
+    name: Check for Cargo.lock downgrades
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'allow-downgrade')
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Check for base lockfile
+        id: base-lockfile
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          if git cat-file -e "origin/$BASE_REF:Cargo.lock"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Cargo.lock on base branch; skipping downgrade check."
+          fi
+      - name: Check for dependency downgrades
+        id: downgrades
+        if: steps.base-lockfile.outputs.exists == 'true'
+        # Temporary fork until https://github.com/Garfield1002/cargo-no-downgrades/issues/1 is fixed.
+        uses: prestist/cargo-no-downgrades@e34e8a1894e48119667dbe321f2059d60aaf4d6e # fix-downgrade-detection
+      - name: Explain intentional downgrade override
+        if: failure() && steps.downgrades.outcome == 'failure'
+        run: |
+          echo "If the downgrade is intentional, add the 'allow-downgrade' label and document the reason in the PR description."
   tests-other-channels:
     name: Tests, unstable toolchain
     runs-on: ubuntu-latest
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     continue-on-error: true
     strategy:
       matrix:
         channel: [beta, nightly]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
